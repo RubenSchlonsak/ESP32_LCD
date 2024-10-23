@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../esp32_imu"
+		},
+		{
+			"name": "lcd_example",
+			"path": "."
+		}
+	],
+	"settings": {}
+}
