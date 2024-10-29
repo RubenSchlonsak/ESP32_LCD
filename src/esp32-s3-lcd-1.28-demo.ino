@@ -6,6 +6,10 @@
 #include <BLEUtils.h>
 #include <BLEServer.h>
 
+// Define constants and global variables
+#define SERVICE_UUID        "12345678-1234-1234-1234-123456789012"
+#define CHARACTERISTIC_UUID "abcdef12-3456-789a-bcde-123456789abc"
+
 UWORD Imagesize = LCD_1IN28_HEIGHT * LCD_1IN28_WIDTH * 2;
 UWORD *BlackImage = NULL;
 float acc[3], gyro[3];
@@ -15,10 +19,6 @@ uint16_t result;
 BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
 bool deviceConnected = false;
-
-// BLE UUIDs
-#define SERVICE_UUID        "12345678-1234-1234-1234-123456789012"
-#define CHARACTERISTIC_UUID "abcdef12-3456-789a-bcde-123456789abc"
 
 // Server callback to track connection state
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -34,11 +34,28 @@ class MyServerCallbacks: public BLEServerCallbacks {
     }
 };
 
+void bleTask(void *pvParameters) {
+    while (true) {
+        if (deviceConnected) {
+            char dataStr[100];
+            snprintf(dataStr, sizeof(dataStr), "ACC: %.2f, %.2f, %.2f; GYRO: %.2f, %.2f, %.2f",
+                     acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2]);
+            pCharacteristic->setValue(dataStr);
+            pCharacteristic->notify();
+        }
+        vTaskDelay(500 / portTICK_PERIOD_MS); // 500ms delay
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
+    Serial.println("Starting setup...");
 
-    // BLE Initialization
+    // Set log level to ERROR to reduce verbosity
+    esp_log_level_set("*", ESP_LOG_ERROR);
+
+    // Initialize BLE
     BLEDevice::init("ESP32-BLE-AccelGyro");
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new MyServerCallbacks());
@@ -55,76 +72,47 @@ void setup()
     pService->start();
     BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
     pAdvertising->start();
+    Serial.println("BLE advertising started");
 
-    // Set BLE Security Mode
-    BLESecurity *pSecurity = new BLESecurity();
-    pSecurity->setAuthenticationMode(ESP_LE_AUTH_BOND);  // Bonding mode without MITM protection
-
-    // PSRAM Initialize
+    // Initialize PSRAM
     if(psramInit()){
-      Serial.println("\nPSRAM is correctly initialized");
-    }else{
-      Serial.println("PSRAM not available");
-    }
-    if ((BlackImage = (UWORD *)ps_malloc(Imagesize)) == NULL){
-        Serial.println("Failed to apply for black memory...");
-        exit(0);
+        Serial.println("PSRAM is correctly initialized");
+    } else {
+        Serial.println("PSRAM not available");
     }
 
-    if (DEV_Module_Init() != 0)
-      Serial.println("GPIO Init Fail!");
-    else
-      Serial.println("GPIO Init successful!");
-      
+    BlackImage = (UWORD *)ps_malloc(Imagesize);
+    if (BlackImage == NULL){
+        Serial.println("Failed to allocate memory for BlackImage");
+        while (true) { delay(1000); } // Halt
+    }
+
+    // Initialize display
+    if (DEV_Module_Init() != 0) {
+        Serial.println("GPIO Init Fail!");
+        while (true) { delay(1000); } // Halt
+    } else {
+        Serial.println("GPIO Init successful!");
+    }
+
     LCD_1IN28_Init(HORIZONTAL);
-    LCD_1IN28_Clear(WHITE);  
-    /*1.Create a new image cache named IMAGE_RGB and fill it with white*/
+    LCD_1IN28_Clear(WHITE);
     Paint_NewImage((UBYTE *)BlackImage, LCD_1IN28.WIDTH, LCD_1IN28.HEIGHT, 0, WHITE);
     Paint_SetScale(65);
     Paint_SetRotate(ROTATE_0);
     Paint_Clear(WHITE);
-    
-    // /* GUI */
-    Serial.println("drawing...\r\n");
-    // /*2.Drawing on the image*/
-#if 1
-    Paint_Clear(WHITE);
-    Paint_DrawPoint(50, 41, BLACK, DOT_PIXEL_1X1, DOT_FILL_RIGHTUP); // 240 240
-    Paint_DrawPoint(50, 46, BLACK, DOT_PIXEL_2X2, DOT_FILL_RIGHTUP);
-    Paint_DrawPoint(50, 51, BLACK, DOT_PIXEL_3X3, DOT_FILL_RIGHTUP);
-    Paint_DrawPoint(50, 56, BLACK, DOT_PIXEL_4X4, DOT_FILL_RIGHTUP);
-    Paint_DrawPoint(50, 61, BLACK, DOT_PIXEL_5X5, DOT_FILL_RIGHTUP);
 
-    Paint_DrawLine(60, 40, 90, 70, MAGENTA, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
-    Paint_DrawLine(60, 70, 90, 40, MAGENTA, DOT_PIXEL_2X2, LINE_STYLE_SOLID);
+    // Initial drawing (optional)
+    // ...
 
-    Paint_DrawRectangle(60, 40, 90, 70, RED, DOT_PIXEL_2X2, DRAW_FILL_EMPTY);
-    Paint_DrawRectangle(100, 40, 130, 70, BLUE, DOT_PIXEL_2X2, DRAW_FILL_FULL);
-
-    Paint_DrawLine(135, 55, 165, 55, CYAN, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-    Paint_DrawLine(150, 40, 150, 70, CYAN, DOT_PIXEL_1X1, LINE_STYLE_DOTTED);
-
-    Paint_DrawCircle(150, 55, 15, GREEN, DOT_PIXEL_1X1, DRAW_FILL_EMPTY);
-    Paint_DrawCircle(185, 55, 15, GREEN, DOT_PIXEL_1X1, DRAW_FILL_FULL);
-
-    Paint_DrawNum(50, 80, 9.87654321, &Font20, 3, WHITE, BLACK);
-    Paint_DrawString_EN(50, 100, "ABC", &Font20, 0x000f, 0xfff0);
-    Paint_DrawString_EN(50, 161, "Waveshare", &Font16, RED, WHITE);
-
-    // /*3.Refresh the picture in RAM to LCD*/
     LCD_1IN28_Display(BlackImage);
     DEV_Delay_ms(1000);
-#endif
 
-#if 1
-    float acc[3], gyro[3];
-    unsigned int tim_count = 0;
-    uint16_t result;
-
+    // Initialize sensors
     QMI8658_init();
-    Serial.println("QMI8658_init\r\n");
-    // DEV_SET_PWM(100);
-    const float conversion_factor = 3.3f / (1 << 12) * 3;
+    Serial.println("QMI8658 initialized");
+
+    // Initial display setup
     Paint_Clear(WHITE);
     Paint_DrawRectangle(0, 00, 240, 47, 0XF410, DOT_PIXEL_2X2, DRAW_FILL_FULL);
     Paint_DrawRectangle(0, 47, 240, 120, 0X4F30, DOT_PIXEL_2X2, DRAW_FILL_FULL);
@@ -141,40 +129,38 @@ void setup()
     Paint_DrawString_EN(45, 200, "BAT(V)=", &Font16, WHITE, BLACK);
     LCD_1IN28_Display(BlackImage);
 
-    while (true)
-    {
-        result = DEC_ADC_Read();
-        QMI8658_read_xyz(acc, gyro, &tim_count);
-        Paint_Clear(WHITE);
-        Paint_DrawRectangle(120, 47,  220, 120, 0X4F30, DOT_PIXEL_2X2, DRAW_FILL_FULL);
-        Paint_DrawRectangle(120, 120, 220, 195, 0XAD55, DOT_PIXEL_2X2, DRAW_FILL_FULL);
-        Paint_DrawRectangle(120, 195, 220, 240, 0X2595, DOT_PIXEL_2X2, DRAW_FILL_FULL);
-        Paint_DrawNum(120, 50, acc[0], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(120, 75, acc[1], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(120, 100, acc[2], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(120, 125, gyro[0], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(120, 150, gyro[1], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(120, 175, gyro[2], &Font16, 2, BLACK, WHITE);
-        Paint_DrawNum(130, 200, result * conversion_factor, &Font16, 2, BLACK, WHITE);
-        LCD_1IN28_DisplayWindows(120, 50, 210, 200, BlackImage);
-        LCD_1IN28_DisplayWindows(130, 200, 220, 220, BlackImage);
+    // Create BLE task
+    xTaskCreate(bleTask, "BLE Task", 4096, NULL, 1, NULL);
 
-        // Send data over BLE
-        if (deviceConnected) {
-            char dataStr[100];
-            snprintf(dataStr, sizeof(dataStr), "ACC: %.2f, %.2f, %.2f; GYRO: %.2f, %.2f, %.2f",
-                     acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2]);
-            pCharacteristic->setValue(dataStr);
-            pCharacteristic->notify();
-        }
-
-        delay(100); // 0.1 second delay
-    }
-#endif
-    delay(2000);
+    Serial.println("Setup complete");
 }
 
 void loop()
 {
-    // Empty loop since the main code runs in setup()
+    // Handle sensor reading and display updates here or in another FreeRTOS task
+    result = DEC_ADC_Read();
+    QMI8658_read_xyz(acc, gyro, &tim_count);
+
+    const float conversion_factor = 3.3f / (1 << 12) * 3;
+
+    // Update display
+    Paint_Clear(WHITE);
+    Paint_DrawRectangle(120, 47, 220, 120, 0X4F30, DOT_PIXEL_2X2, DRAW_FILL_FULL);
+    Paint_DrawRectangle(120, 120, 220, 195, 0XAD55, DOT_PIXEL_2X2, DRAW_FILL_FULL);
+    Paint_DrawRectangle(120, 195, 220, 240, 0X2595, DOT_PIXEL_2X2, DRAW_FILL_FULL);
+    Paint_DrawNum(120, 50, acc[0], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(120, 75, acc[1], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(120, 100, acc[2], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(120, 125, gyro[0], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(120, 150, gyro[1], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(120, 175, gyro[2], &Font16, 2, BLACK, WHITE);
+    Paint_DrawNum(130, 200, result * conversion_factor, &Font16, 2, BLACK, WHITE);
+    LCD_1IN28_DisplayWindows(120, 50, 210, 200, BlackImage);
+    LCD_1IN28_DisplayWindows(130, 200, 220, 220, BlackImage);
+
+    // Optional: Monitor heap
+    Serial.print("Free heap: ");
+    Serial.println(ESP.getFreeHeap());
+
+    delay(100); // 100ms delay
 }
