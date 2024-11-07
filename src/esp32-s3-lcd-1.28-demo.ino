@@ -5,7 +5,7 @@
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
-
+#include <ArduinoJson.h> 
 // Define constants and global variables
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789012"
 #define CHARACTERISTIC_UUID "abcdef12-3456-789a-bcde-123456789abc"
@@ -35,15 +35,60 @@ class MyServerCallbacks: public BLEServerCallbacks {
 };
 
 void bleTask(void *pvParameters) {
+    // Initialisierung kann hier erfolgen, falls notwendig
+
+    // JSON-Dokument vorbereiten
+    const size_t capacity = JSON_OBJECT_SIZE(5) + 100;
+    StaticJsonDocument<capacity> doc;
+
     while (true) {
         if (deviceConnected) {
-            char dataStr[100];
-            snprintf(dataStr, sizeof(dataStr), "ACC: %.2f, %.2f, %.2f; GYRO: %.2f, %.2f, %.2f",
-                     acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2]);
-            pCharacteristic->setValue(dataStr);
+            // Erfasse den aktuellen Zeitstempel in Mikrosekunden seit Programmstart
+            unsigned long timestamp = micros();
+
+            // Fehlerüberprüfung der Sensordaten
+            const char* status = "OK";
+            bool dataError = false;
+            for (int i = 0; i < 3; i++) {
+                if (isnan(acc[i]) || isnan(gyro[i])) {
+                    dataError = true;
+                    break;
+                }
+            }
+            if (dataError) {
+                status = "ERROR";
+            }
+
+            // JSON-Daten strukturieren
+            doc["timestamp"] = timestamp; // Mikrosekunden
+            doc["status"] = status;
+
+            // Beschleunigungsdaten hinzufügen
+            JsonArray accArray = doc.createNestedArray("acceleration");
+            accArray.add(acc[0]);
+            accArray.add(acc[1]);
+            accArray.add(acc[2]);
+
+            // Gyroskopdaten hinzufügen
+            JsonArray gyroArray = doc.createNestedArray("gyroscope");
+            gyroArray.add(gyro[0]);
+            gyroArray.add(gyro[1]);
+            gyroArray.add(gyro[2]);
+
+            // JSON in String umwandeln
+            char dataStr[256];
+            size_t n = serializeJson(doc, dataStr);
+
+            // BLE-Daten senden
+            pCharacteristic->setValue((uint8_t*)dataStr, n);
             pCharacteristic->notify();
+
+            // JSON-Dokument zurücksetzen für den nächsten Durchlauf
+            doc.clear();
         }
-        vTaskDelay(500 / portTICK_PERIOD_MS); // 500ms delay
+
+        // Anpassung der Verzögerung für höhere Sampling-Rate (ca. 100 Hz)
+        vTaskDelay(10 / portTICK_PERIOD_MS); // 10 ms Verzögerung
     }
 }
 
