@@ -20,6 +20,8 @@ BLEServer *pServer = NULL;
 BLECharacteristic *pCharacteristic = NULL;
 bool deviceConnected = false;
 
+
+
 // Server callback to track connection state
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -182,6 +184,8 @@ void setup()
 
 void loop()
 {
+    TickType_t xLastWakeTime;
+    xLastWakeTime = xTaskGetTickCount();
     // Handle sensor reading and display updates here or in another FreeRTOS task
     result = DEC_ADC_Read();
     QMI8658_read_xyz(acc, gyro, &tim_count);
@@ -206,6 +210,6 @@ void loop()
     // Optional: Monitor heap
     Serial.print("Free heap: ");
     Serial.println(ESP.getFreeHeap());
-
-    delay(100); // 100ms delay
+    
+    vTaskDelayUntil(&xLastWakeTime, 100/ portTICK_PERIOD_MS);
 }
