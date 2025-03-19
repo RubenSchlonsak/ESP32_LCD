@@ -33,11 +33,13 @@ const char* touchPinNames[] = {"toe", "ball_inside", "ball_middle", "heel", "arc
 class MyServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) override {
     deviceConnected = true;
-    Serial.println("Device connected");
+    Serial.println("🔵 Device connected!");
   }
+
   void onDisconnect(BLEServer* pServer) override {
     deviceConnected = false;
-    Serial.println("Device disconnected");
+    Serial.println("🔴 Device disconnected!");
+    delay(1000);
     pServer->startAdvertising();
   }
 };
@@ -54,7 +56,7 @@ void updateDisplayStatus() {
 
 void bleTask(void *pvParameters) {
   StaticJsonDocument<2048> doc;
-  char dataStr[1024];
+  char dataStr[512];
   static uint32_t frame_id = 0;
 
   while (true) {
@@ -67,48 +69,41 @@ void bleTask(void *pvParameters) {
       JsonObject root = doc.to<JsonObject>();
       JsonArray batch = root.createNestedArray("batch");
 
-      for (int i = 0; i < BATCH_SIZE; i++) {
-        JsonObject measurement = batch.createNestedObject();
-        measurement["f"] = frame_id++;
-        measurement["timestamp"] = micros();
+      JsonObject measurement = batch.createNestedObject();
+      measurement["f"] = frame_id++;
+      measurement["timestamp"] = micros();
 
-        const char* status = "OK";
-        bool dataError = false;
-        for (int j = 0; j < 3; j++) {
-          if (isnan(acc[j]) || isnan(gyro[j])) {
-            dataError = true;
-            break;
-          }
+      bool dataError = false;
+      for (int j = 0; j < 3; j++) {
+        if (isnan(acc[j]) || isnan(gyro[j])) {
+          dataError = true;
+          break;
         }
-        if (dataError) {
-          status = "ERROR";
-        }
-        measurement["status"] = status;
+      }
+      measurement["status"] = dataError ? "ERROR" : "OK";
 
-        JsonArray accArray = measurement.createNestedArray("acceleration");
-        accArray.add(acc[0]);
-        accArray.add(acc[1]);
-        accArray.add(acc[2]);
+      JsonArray accArray = measurement.createNestedArray("acceleration");
+      for (int j = 0; j < 3; j++) accArray.add(acc[j]);
 
-        JsonArray gyroArray = measurement.createNestedArray("gyroscope");
-        gyroArray.add(gyro[0]);
-        gyroArray.add(gyro[1]);
-        gyroArray.add(gyro[2]);
+      JsonArray gyroArray = measurement.createNestedArray("gyroscope");
+      for (int j = 0; j < 3; j++) gyroArray.add(gyro[j]);
 
-        JsonObject touchData = measurement.createNestedObject("touch");
-        for (int t = 0; t < numTouchPins; t++) {
-          touchValues[t] = touchRead(touchPins[t]);
-          touchData[touchPinNames[t]] = touchValues[t];
-        }
-
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+      JsonObject touchData = measurement.createNestedObject("touch");
+      for (int t = 0; t < numTouchPins; t++) {
+        touchValues[t] = touchRead(touchPins[t]);
+        delayMicroseconds(10);
+        touchData[touchPinNames[t]] = touchValues[t];
       }
 
       size_t n = serializeJson(doc, dataStr, sizeof(dataStr));
       pCharacteristic->setValue((uint8_t*)dataStr, n);
       pCharacteristic->notify();
 
+      Serial.print("📤 Sending data: ");
+      Serial.println(dataStr);
+
       doc.clear();
+      vTaskDelay(50 / portTICK_PERIOD_MS);
     }
     else {
       vTaskDelay(100 / portTICK_PERIOD_MS);
@@ -118,9 +113,7 @@ void bleTask(void *pvParameters) {
 
 void setup() {
   Serial.begin(115200);
-  for (int i = 0; i < numTouchPins; i++) {
-    pinMode(touchPins[i], INPUT);
-  }
+  for (int i = 0; i < numTouchPins; i++) pinMode(touchPins[i], INPUT);
 
   BLEDevice::init("ESP32-BLE-AccelGyro");
   pServer = BLEDevice::createServer();
@@ -133,15 +126,27 @@ void setup() {
                       BLECharacteristic::PROPERTY_WRITE |
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
-  pCharacteristic->setValue("AccelGyro Data");
-  pCharacteristic->addDescriptor(new BLE2902());
-  pService->start();
-  BLEDevice::getAdvertising()->start();
 
-  if (psramInit()) {
-    Serial.println("PSRAM initialized");
-  }
+  BLE2902* desc = new BLE2902();
+  desc->setNotifications(true);
+  pCharacteristic->addDescriptor(desc);
+  pCharacteristic->setValue("AccelGyro Data");
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  BLEDevice::startAdvertising();
+  Serial.println("📡 BLE Advertising started");
+
+  if (psramInit()) Serial.println("PSRAM initialized");
+
   BlackImage = (UWORD *)ps_malloc(Imagesize);
+  if (!BlackImage) {
+    Serial.println("❌ PSRAM allocation failed!");
+    while (1);
+  }
 
   DEV_Module_Init();
   LCD_1IN28_Init(HORIZONTAL);
@@ -151,16 +156,13 @@ void setup() {
   Paint_SetRotate(ROTATE_0);
 
   updateDisplayStatus();
-
   QMI8658_init();
-
-  xTaskCreate(bleTask, "BLE Task", 4096, NULL, 1, NULL);
+  xTaskCreate(bleTask, "BLE Task", 8192, NULL, 1, NULL);
 }
 
 void loop() {
   TickType_t xLastWakeTime = xTaskGetTickCount();
   result = DEC_ADC_Read();
   QMI8658_read_xyz(acc, gyro, &tim_count);
-
   vTaskDelayUntil(&xLastWakeTime, 10 / portTICK_PERIOD_MS);
 }
