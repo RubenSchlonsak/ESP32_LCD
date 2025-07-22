@@ -8,13 +8,13 @@ import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 from bleak import BleakClient, BleakScanner
 
-# BLE UUIDs (müssen mit ESP32-Firmware übereinstimmen)
+# BLE UUIDs (must match ESP32 firmware)
 SERVICE_UUID      = "12345678-1234-1234-1234-123456789012"
 DATA_CHAR_UUID    = "abcdef12-3456-789a-bcde-123456789abc"
 CONTROL_CHAR_UUID = "12345678-1234-1234-1234-123456789013"
 
 class BLEWorker(threading.Thread):
-    """Hintergrund-Thread für BLE-Kommunikation"""
+    """Background thread for BLE communication"""
     def __init__(self, data_queue):
         super().__init__(daemon=True)
         self.loop = asyncio.new_event_loop()
@@ -30,12 +30,12 @@ class BLEWorker(threading.Thread):
                 self.device_address = d.address
                 break
         if not self.device_address:
-            self.data_queue.put({'type':'error', 'msg':'ESP32-IMU nicht gefunden'})
+            self.data_queue.put({'type':'error', 'msg':'ESP32-IMU not found'})
             return False
         self.client = BleakClient(self.device_address, loop=self.loop)
         await self.client.connect()
         await self.client.start_notify(DATA_CHAR_UUID, self.notification_handler)
-        self.data_queue.put({'type':'info', 'msg':'🔗 Verbunden'})
+        self.data_queue.put({'type':'info', 'msg':'🔗 Connected'})
         return True
 
     async def notification_handler(self, sender, data):
@@ -51,17 +51,17 @@ class BLEWorker(threading.Thread):
             }
             self.data_queue.put({'type':'data', 'entry':entry})
         except Exception as e:
-            self.data_queue.put({'type':'error', 'msg':f"Parse-Error: {e}"})
+            self.data_queue.put({'type':'error', 'msg':f"Parse error: {e}"})
 
     async def handle_commands(self):
-        # läuft nebenbei im selben Loop
+        # runs concurrently in same loop
         while self.running:
             await asyncio.sleep(0.1)
-        # Wenn gestoppt, sauber trennen
+        # on stop, disconnect cleanly
         if self.client and self.client.is_connected:
             await self.client.stop_notify(DATA_CHAR_UUID)
             await self.client.disconnect()
-            self.data_queue.put({'type':'info', 'msg':'🔌 Getrennt'})
+            self.data_queue.put({'type':'info', 'msg':'🔌 Disconnected'})
 
     def run(self):
         self.running = True
@@ -76,13 +76,13 @@ class BLEWorker(threading.Thread):
             self.loop.close()
 
     def send(self, command: str):
-        """Befehl asynchron senden"""
+        """Send command asynchronously"""
         if self.client and self.client.is_connected:
             asyncio.run_coroutine_threadsafe(
                 self.client.write_gatt_char(CONTROL_CHAR_UUID, command.encode()),
                 self.loop
             )
-            self.data_queue.put({'type':'info', 'msg':f"Gesendet: {command}"})
+            self.data_queue.put({'type':'info', 'msg':f"Sent: {command}"})
 
     def stop(self):
         self.running = False
@@ -93,16 +93,20 @@ class IMUGUI:
         self.root = root
         root.title("ESP32-IMU GUI")
 
-        # Queue für Nachrichten und Daten vom BLE-Thread
+        # Queue for messages and data from BLE thread
         self.queue = queue.Queue()
         self.ble = None
 
-        # GUI-Elemente
+        # Data recording flag and log
+        self.recording = False
+        self.data_log = []  # for CSV export
+
+        # GUI elements
         frm = tk.Frame(root)
         frm.pack(padx=10, pady=5)
 
-        tk.Button(frm, text="Verbinden", command=self.connect).grid(row=0, column=0)
-        tk.Button(frm, text="Trennen", command=self.disconnect).grid(row=0, column=1)
+        tk.Button(frm, text="Connect", command=self.connect).grid(row=0, column=0)
+        tk.Button(frm, text="Disconnect", command=self.disconnect).grid(row=0, column=1)
 
         tk.Label(frm, text="Hz:").grid(row=1, column=0, pady=5)
         self.rate_var = tk.StringVar(value="100")
@@ -112,17 +116,18 @@ class IMUGUI:
         tk.Button(frm, text="Display ON", command=lambda: self.send_cmd("DISPLAY:ON")).grid(row=2, column=0)
         tk.Button(frm, text="Display OFF", command=lambda: self.send_cmd("DISPLAY:OFF")).grid(row=2, column=1)
 
-        tk.Button(frm, text="Daten speichern", command=self.save_csv).grid(row=2, column=2)
+        # Recording controls
+        tk.Button(frm, text="Start Recording", command=self.start_recording).grid(row=3, column=0)
+        tk.Button(frm, text="Stop & Save Recording", command=self.stop_recording).grid(row=3, column=1)
 
         self.log = scrolledtext.ScrolledText(root, width=80, height=20, state='disabled')
         self.log.pack(padx=10, pady=5)
 
-        self.data_log = []  # zum CSV export
         self.root.after(100, self.process_queue)
 
     def connect(self):
         if self.ble and self.ble.is_alive():
-            messagebox.showinfo("Info", "Schon verbunden")
+            messagebox.showinfo("Info", "Already connected")
             return
         self.ble = BLEWorker(self.queue)
         self.ble.start()
@@ -134,7 +139,7 @@ class IMUGUI:
     def set_rate(self):
         hz = self.rate_var.get()
         if not hz.isdigit() or not (1 <= int(hz) <= 500):
-            messagebox.showerror("Fehler", "Hz muss 1–500 sein")
+            messagebox.showerror("Error", "Rate must be between 1 and 500 Hz")
             return
         self.send_cmd(f"RATE:{hz}")
 
@@ -142,7 +147,23 @@ class IMUGUI:
         if self.ble:
             self.ble.send(cmd)
         else:
-            messagebox.showwarning("Warnung", "Nicht verbunden")
+            messagebox.showwarning("Warning", "Not connected")
+
+    def start_recording(self):
+        if self.recording:
+            messagebox.showinfo("Info", "Recording already in progress")
+            return
+        self.data_log.clear()
+        self.recording = True
+        self.append_log("Recording started\n")
+
+    def stop_recording(self):
+        if not self.recording:
+            messagebox.showinfo("Info", "Recording is not active")
+            return
+        self.recording = False
+        self.append_log("Recording stopped\n")
+        self.save_csv()
 
     def process_queue(self):
         try:
@@ -154,7 +175,8 @@ class IMUGUI:
                             f"A[{e['accel'][0]:.2f}, {e['accel'][1]:.2f}, {e['accel'][2]:.2f}] "
                             f"G[{e['gyro'][0]:.2f}, {e['gyro'][1]:.2f}, {e['gyro'][2]:.2f}]\n")
                     self.append_log(line)
-                    self.data_log.append(e)
+                    if self.recording:
+                        self.data_log.append(e)
                 elif msg['type'] == 'info':
                     self.append_log(f"{msg['msg']}\n")
                 elif msg['type'] == 'error':
@@ -172,10 +194,10 @@ class IMUGUI:
 
     def save_csv(self):
         if not self.data_log:
-            messagebox.showinfo("Info", "Keine Daten zum Speichern")
+            messagebox.showinfo("Info", "No data to save")
             return
         fname = filedialog.asksaveasfilename(defaultextension='.csv',
-                                             filetypes=[('CSV Dateien','*.csv')])
+                                             filetypes=[('CSV Files','*.csv')])
         if not fname:
             return
         with open(fname, 'w', newline='') as f:
@@ -185,7 +207,7 @@ class IMUGUI:
             writer.writeheader()
             for e in self.data_log:
                 writer.writerow(e)
-        messagebox.showinfo("Erfolg", f"CSV gespeichert: {fname}")
+        messagebox.showinfo("Success", f"CSV saved: {fname}")
 
 if __name__ == '__main__':
     root = tk.Tk()
