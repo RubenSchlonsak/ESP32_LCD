@@ -1,7 +1,5 @@
 #include <Arduino.h>
 #include "LCD_Test.h"
-#include <WiFi.h>
-#include <WiFiClient.h>
 #include <BLEDevice.h>
 #include <BLEUtils.h>
 #include <BLEServer.h>
@@ -9,160 +7,194 @@
 #include <BLE2902.h>
 
 #define SERVICE_UUID        "12345678-1234-1234-1234-123456789012"
-#define CHARACTERISTIC_UUID "abcdef12-3456-789a-bcde-123456789abc"
+#define DATA_CHAR_UUID      "abcdef12-3456-789a-bcde-123456789abc"
+#define CONTROL_CHAR_UUID   "12345678-1234-1234-1234-123456789013"
 
-UWORD Imagesize = LCD_1IN28_HEIGHT * LCD_1IN28_WIDTH * 2;
-UWORD *BlackImage = NULL;
-float acc[3], gyro[3];
-unsigned int tim_count = 0;
-uint16_t result;
+// Display control (adjust pin if needed)
+#define DISPLAY_BL_PIN      0
+bool displayEnabled = true;
 
-BLEServer *pServer = NULL;
-BLECharacteristic *pCharacteristic = NULL;
+// Sampling control (default 100Hz = 10ms interval)
+volatile uint32_t samplingInterval = 10;  // ms
+
+BLEServer *pServer = nullptr;
+BLECharacteristic *pDataCharacteristic = nullptr;
+BLECharacteristic *pControlCharacteristic = nullptr;
 bool deviceConnected = false;
-bool previousConnectionState = false;
+bool oldDeviceConnected = false;
+hw_timer_t *samplingTimer = nullptr;
 
-#define BATCH_SIZE 1
+// Use a 32‑bit type to avoid overflow on the image buffer
+uint32_t ImageSize = (uint32_t)LCD_1IN28_HEIGHT * LCD_1IN28_WIDTH * 2;
+uint16_t *BlackImage = nullptr;
 
-const int touchPins[] = {2, 3, 4, 5, 13, 14};
-const int numTouchPins = sizeof(touchPins) / sizeof(touchPins[0]);
-int touchValues[numTouchPins];
+// Forward declaration
+void updateDisplay();
 
-const char* touchPinNames[] = {"toe", "ball_inside", "ball_middle", "heel", "arch", "ball_outside"};
+class ControlCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pChar) override {
+        std::string value = pChar->getValue();
+        if (value.length() == 0) return;
 
-class MyServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer* pServer) override {
-    deviceConnected = true;
-    Serial.println("🔵 Device connected!");
-  }
-
-  void onDisconnect(BLEServer* pServer) override {
-    deviceConnected = false;
-    Serial.println("🔴 Device disconnected!");
-    delay(1000);
-    pServer->startAdvertising();
-  }
+        String command = String(value.c_str());
+        if (command.startsWith("RATE:")) {
+            uint32_t newRate = command.substring(5).toInt();
+            if (newRate > 0 && newRate <= 500) {
+                samplingInterval = 1000 / newRate;
+                timerAlarmWrite(samplingTimer, samplingInterval * 1000, true);
+                Serial.printf("Sampling rate set to: %u Hz (interval: %u ms)\n", newRate, samplingInterval);
+            }
+        }
+        else if (command == "DISPLAY:ON") {
+            displayEnabled = true;
+            digitalWrite(DISPLAY_BL_PIN, HIGH);
+            ::updateDisplay();
+            Serial.println("Display turned ON");
+        }
+        else if (command == "DISPLAY:OFF") {
+            displayEnabled = false;
+            digitalWrite(DISPLAY_BL_PIN, LOW);
+            ::updateDisplay();               // refresh display text
+            Serial.println("Display turned OFF");
+        }
+    }
 };
 
-void updateDisplayStatus() {
-  Paint_Clear(WHITE);
-  if (deviceConnected) {
-    Paint_DrawString_EN(60, 100, "CONNECTED", &Font24, BLACK, WHITE);
-  } else {
-    Paint_DrawString_EN(60, 100, "READY", &Font24, BLACK, WHITE);
-  }
-  LCD_1IN28_Display(BlackImage);
+class ServerCallbacks : public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) override {
+        deviceConnected = true;
+        displayEnabled = true;
+        digitalWrite(DISPLAY_BL_PIN, HIGH);
+        ::updateDisplay();
+    }
+
+    void onDisconnect(BLEServer* pServer) override {
+        deviceConnected = false;
+        displayEnabled = false;
+        digitalWrite(DISPLAY_BL_PIN, LOW);
+        pServer->startAdvertising();
+    }
+};
+
+void IRAM_ATTR onTimer() {
+    // ISR stub: do minimal work here if needed
 }
 
-void bleTask(void *pvParameters) {
-  StaticJsonDocument<2048> doc;
-  char dataStr[512];
-  static uint32_t frame_id = 0;
-
-  while (true) {
-    if (previousConnectionState != deviceConnected) {
-      updateDisplayStatus();
-      previousConnectionState = deviceConnected;
-    }
-
+void updateDisplay() {
+    if (!displayEnabled) return;
+    Paint_Clear(WHITE);
     if (deviceConnected) {
-      JsonObject root = doc.to<JsonObject>();
-      JsonArray batch = root.createNestedArray("batch");
-
-      JsonObject measurement = batch.createNestedObject();
-      measurement["f"] = frame_id++;
-      measurement["timestamp"] = micros();
-
-      bool dataError = false;
-      for (int j = 0; j < 3; j++) {
-        if (isnan(acc[j]) || isnan(gyro[j])) {
-          dataError = true;
-          break;
-        }
-      }
-      measurement["status"] = dataError ? "ERROR" : "OK";
-
-      JsonArray accArray = measurement.createNestedArray("acceleration");
-      for (int j = 0; j < 3; j++) accArray.add(acc[j]);
-
-      JsonArray gyroArray = measurement.createNestedArray("gyroscope");
-      for (int j = 0; j < 3; j++) gyroArray.add(gyro[j]);
-
-      JsonObject touchData = measurement.createNestedObject("touch");
-      for (int t = 0; t < numTouchPins; t++) {
-        touchValues[t] = touchRead(touchPins[t]);
-        delayMicroseconds(10);
-        touchData[touchPinNames[t]] = touchValues[t];
-      }
-
-      size_t n = serializeJson(doc, dataStr, sizeof(dataStr));
-      pCharacteristic->setValue((uint8_t*)dataStr, n);
-      pCharacteristic->notify();
-
-      Serial.print("📤 Sending data: ");
-      Serial.println(dataStr);
-
-      doc.clear();
-      vTaskDelay(50 / portTICK_PERIOD_MS);
+        Paint_DrawString_EN(60, 100, "CONNECTED", &Font24, BLACK, WHITE);
+    } else {
+        Paint_DrawString_EN(60, 100, "READY", &Font24, BLACK, WHITE);
     }
-    else {
-      vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-  }
+    LCD_1IN28_Display(BlackImage);
 }
 
 void setup() {
-  Serial.begin(115200);
-  for (int i = 0; i < numTouchPins; i++) pinMode(touchPins[i], INPUT);
+    Serial.begin(115200);
 
-  BLEDevice::init("ESP32-BLE-AccelGyro");
-  pServer = BLEDevice::createServer();
-  pServer->setCallbacks(new MyServerCallbacks());
+    // Initialize display backlight
+    pinMode(DISPLAY_BL_PIN, OUTPUT);
+    digitalWrite(DISPLAY_BL_PIN, HIGH);
 
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID,
-                      BLECharacteristic::PROPERTY_READ  |
-                      BLECharacteristic::PROPERTY_WRITE |
-                      BLECharacteristic::PROPERTY_NOTIFY
-                    );
+    // Initialize display hardware
+    if (psramInit()) Serial.println("PSRAM initialized");
+    BlackImage = (uint16_t *)ps_malloc(ImageSize);
+    if (!BlackImage) {
+        Serial.println("PSRAM allocation failed!");
+        while (1);
+    }
+    DEV_Module_Init();
+    LCD_1IN28_Init(HORIZONTAL);
+    LCD_1IN28_Clear(WHITE);
+    Paint_NewImage((UBYTE *)BlackImage, LCD_1IN28.WIDTH, LCD_1IN28.HEIGHT, 0, WHITE);
+    Paint_SetScale(65);
+    Paint_SetRotate(ROTATE_0);
 
-  BLE2902* desc = new BLE2902();
-  desc->setNotifications(true);
-  pCharacteristic->addDescriptor(desc);
-  pCharacteristic->setValue("AccelGyro Data");
-  pService->start();
+    // Initial display
+    updateDisplay();
 
-  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x06);
-  BLEDevice::startAdvertising();
-  Serial.println("📡 BLE Advertising started");
+    // BLE Initialization
+    BLEDevice::init("ESP32-IMU");
+    pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new ServerCallbacks());
 
-  if (psramInit()) Serial.println("PSRAM initialized");
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+    pDataCharacteristic = pService->createCharacteristic(
+        DATA_CHAR_UUID,
+        BLECharacteristic::PROPERTY_READ |
+        BLECharacteristic::PROPERTY_NOTIFY
+    );
+    pDataCharacteristic->addDescriptor(new BLE2902());
 
-  BlackImage = (UWORD *)ps_malloc(Imagesize);
-  if (!BlackImage) {
-    Serial.println("❌ PSRAM allocation failed!");
-    while (1);
-  }
+    pControlCharacteristic = pService->createCharacteristic(
+        CONTROL_CHAR_UUID,
+        BLECharacteristic::PROPERTY_WRITE
+    );
+    pControlCharacteristic->setCallbacks(new ControlCallbacks());
 
-  DEV_Module_Init();
-  LCD_1IN28_Init(HORIZONTAL);
-  LCD_1IN28_Clear(WHITE);
-  Paint_NewImage((UBYTE *)BlackImage, LCD_1IN28.WIDTH, LCD_1IN28.HEIGHT, 0, WHITE);
-  Paint_SetScale(65);
-  Paint_SetRotate(ROTATE_0);
+    pService->start();
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    pAdvertising->setMinPreferred(0x06);
+    BLEDevice::startAdvertising();
+    Serial.println("BLE Advertising started");
 
-  updateDisplayStatus();
-  QMI8658_init();
-  xTaskCreate(bleTask, "BLE Task", 8192, NULL, 1, NULL);
+    // IMU initialization
+    QMI8658_init();
+
+    // Setup hardware timer for sampling
+    samplingTimer = timerBegin(0, 80, true);  // 1 MHz base
+    timerAttachInterrupt(samplingTimer, &onTimer, true);
+    timerAlarmWrite(samplingTimer, samplingInterval * 1000, true);
+    timerAlarmEnable(samplingTimer);
 }
 
 void loop() {
-  TickType_t xLastWakeTime = xTaskGetTickCount();
-  result = DEC_ADC_Read();
-  QMI8658_read_xyz(acc, gyro, &tim_count);
-  vTaskDelayUntil(&xLastWakeTime, 10 / portTICK_PERIOD_MS);
+    static uint32_t lastUpdate = 0;
+    static uint32_t frameCount = 0;
+
+    // Handle BLE connection state transitions
+    if (!deviceConnected && oldDeviceConnected) {
+        delay(500);
+        oldDeviceConnected = deviceConnected;
+    }
+    if (deviceConnected && !oldDeviceConnected) {
+        oldDeviceConnected = deviceConnected;
+    }
+
+    // Simple delay-based sampling
+    delay(samplingInterval);
+
+    // Read IMU data
+    float acc[3], gyro[3];
+    unsigned int tim_count;
+    QMI8658_read_xyz(acc, gyro, &tim_count);
+
+    // Build JSON payload
+    StaticJsonDocument<256> doc;
+    JsonObject root = doc.to<JsonObject>();
+    root["frame"] = frameCount++;
+    root["timestamp"] = micros();
+    JsonArray accArr = root.createNestedArray("accel");
+    JsonArray gyroArr = root.createNestedArray("gyro");
+    for (int i = 0; i < 3; i++) {
+        accArr.add(acc[i]);
+        gyroArr.add(gyro[i]);
+    }
+
+    if (deviceConnected) {
+        char payload[256];
+        size_t len = serializeJson(doc, payload);
+        pDataCharacteristic->setValue((uint8_t*)payload, len);
+        pDataCharacteristic->notify();
+
+        // Update display at ~5 Hz
+        if (millis() - lastUpdate > 200) {
+            updateDisplay();
+            lastUpdate = millis();
+        }
+    }
 }
