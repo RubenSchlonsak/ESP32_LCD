@@ -31,8 +31,14 @@ float batteryVoltage = 0.0;
 int batteryPercentage = 0;
 bool batteryCharging = false;
 unsigned long lastBatteryCheck = 0;
-bool batteryAutoUpdate = false;
+bool batteryAutoUpdate = true;  // Changed to true by default
 unsigned long lastDisplayUpdate = 0;
+
+// Battery update intervals
+const unsigned long BATTERY_UPDATE_INTERVAL_CONNECTED = 60000;   // 60 seconds when connected
+const unsigned long BATTERY_UPDATE_INTERVAL_READY = 30000;       // 30 seconds when ready (not connected)
+const unsigned long DISPLAY_UPDATE_INTERVAL_CONNECTED = 1000;    // 1 second when connected
+const unsigned long DISPLAY_UPDATE_INTERVAL_READY = 5000;        // 5 seconds when ready
 
 BLEServer *pServer = nullptr;
 BLECharacteristic *pDataCharacteristic = nullptr;
@@ -270,7 +276,11 @@ void updateDisplay() {
     Paint_DrawString_EN(120, 130, uptimeStr, &Font12, BLACK, WHITE);
     
     // IMU Status (vereinfacht)
-    Paint_DrawString_EN(10, 150, "IMU: Active", &Font12, BLACK, WHITE);
+    if (deviceConnected) {
+        Paint_DrawString_EN(10, 150, "IMU: Active", &Font12, BLACK, WHITE);
+    } else {
+        Paint_DrawString_EN(10, 150, "IMU: Standby", &Font12, BLACK, WHITE);
+    }
     
     // Warnung bei niedrigem Batteriestand
     if (batteryPercentage <= 15) {
@@ -287,7 +297,7 @@ void checkLowBattery() {
     static unsigned long lastWarning = 0;
     
     if (batteryPercentage <= 15 && millis() - lastWarning > 300000) { // Alle 5 Minuten
-        // Warnung senden
+        // Warnung senden (nur wenn verbunden)
         if (deviceConnected) {
             StaticJsonDocument<100> doc;
             doc["type"] = "warning";
@@ -300,7 +310,7 @@ void checkLowBattery() {
             pDataCharacteristic->notify();
         }
         
-        // Display-Warnung (blinken)
+        // Display-Warnung (blinken) - auch im READY-Zustand
         if (displayEnabled) {
             Paint_Clear(RED);
             Paint_DrawString_EN(40, 100, "LOW", &Font24, WHITE, RED);
@@ -435,56 +445,68 @@ void loop() {
     }
     lastBootState = bootState;
 
-    // Automatic battery updates (every 60 seconds)
-    if (batteryAutoUpdate && (millis() - lastBatteryCheck > 60000)) {
+    // Battery monitoring - different intervals based on connection state
+    unsigned long batteryUpdateInterval = deviceConnected ? BATTERY_UPDATE_INTERVAL_CONNECTED : BATTERY_UPDATE_INTERVAL_READY;
+    
+    if (batteryAutoUpdate && (millis() - lastBatteryCheck > batteryUpdateInterval)) {
         updateBatteryStatus();
-        sendBatteryStatus();
+        if (deviceConnected) {
+            sendBatteryStatus();
+        }
         lastBatteryCheck = millis();
     }
 
-    // Simple delay-based IMU sampling
-    delay(samplingInterval);
-
-    // Read IMU data
-    float acc[3], gyro[3];
-    unsigned int tim_count;
-    QMI8658_read_xyz(acc, gyro, &tim_count);
-
-    // Build JSON payload for IMU data
-    StaticJsonDocument<300> doc;
-    doc["type"] = "imu_data";  // Added type field for new protocol
-    doc["frame"] = frameCount++;
-    doc["timestamp"] = millis();
+    // Display updates - different intervals based on connection state
+    unsigned long displayUpdateInterval = deviceConnected ? DISPLAY_UPDATE_INTERVAL_CONNECTED : DISPLAY_UPDATE_INTERVAL_READY;
     
-    JsonArray accArr = doc.createNestedArray("accel");
-    JsonArray gyroArr = doc.createNestedArray("gyro");
-    for (int i = 0; i < 3; i++) {
-        accArr.add(acc[i]);
-        gyroArr.add(gyro[i]);
+    if (millis() - lastDisplayUpdate > displayUpdateInterval) {
+        updateDisplay();
+        lastDisplayUpdate = millis();
     }
 
-    // Send IMU data via BLE
+    // IMU sampling and BLE transmission (only when connected)
     if (deviceConnected) {
+        // Simple delay-based IMU sampling at full rate
+        delay(samplingInterval);
+
+        // Read IMU data
+        float acc[3], gyro[3];
+        unsigned int tim_count;
+        QMI8658_read_xyz(acc, gyro, &tim_count);
+
+        // Build JSON payload for IMU data
+        StaticJsonDocument<300> doc;
+        doc["type"] = "imu_data";  // Added type field for new protocol
+        doc["frame"] = frameCount++;
+        doc["timestamp"] = millis();
+        
+        JsonArray accArr = doc.createNestedArray("accel");
+        JsonArray gyroArr = doc.createNestedArray("gyro");
+        for (int i = 0; i < 3; i++) {
+            accArr.add(acc[i]);
+            gyroArr.add(gyro[i]);
+        }
+
+        // Send IMU data via BLE
         String jsonString;
         serializeJson(doc, jsonString);
         pDataCharacteristic->setValue(jsonString.c_str());
         pDataCharacteristic->notify();
-
-        // Update display at ~1 Hz
-        if (millis() - lastUpdate > 1000) {
-            updateDisplay();
-            lastUpdate = millis();
-        }
+    } else {
+        // When not connected, no IMU sampling - just longer delay to save power
+        delay(500);  // 500ms delay in standby mode
     }
 
-    // Heartbeat every 5 seconds
-    if (millis() - lastHeartbeat > 5000) {
-        Serial.printf("Heartbeat - Frames: %u, Battery: %.2fV (%d%%), Connected: %s\n", 
+    // Heartbeat every 10 seconds in ready mode, 5 seconds when connected
+    unsigned long heartbeatInterval = deviceConnected ? 5000 : 10000;
+    if (millis() - lastHeartbeat > heartbeatInterval) {
+        Serial.printf("Heartbeat - Frames: %u, Battery: %.2fV (%d%%), Connected: %s, Mode: %s\n", 
                      frameCount, batteryVoltage, batteryPercentage, 
-                     deviceConnected ? "Yes" : "No");
+                     deviceConnected ? "Yes" : "No",
+                     deviceConnected ? "SAMPLING" : "STANDBY");
         lastHeartbeat = millis();
     }
 
-    // Check for low battery warning
+    // Check for low battery warning (works in both states)
     checkLowBattery();
 }
