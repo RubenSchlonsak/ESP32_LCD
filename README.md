@@ -145,38 +145,5 @@ You can post‑process into per‑axis columns if needed.
 
 ---
 
-## Display & battery behavior (firmware)
 
-- When **display is ON**, the screen is refreshed at a reduced rate while connected, and backlight is controlled on GPIO 40.
-- **Battery**: voltage and percentage are computed on `BATTERY_ADC_PIN` with Waveshare’s divider factor. When `BATTERY_AUTO:ON`, periodic reports are sent; a **low‑battery warning** is broadcast and also drawn on screen.
 
----
-
-## Extending the project
-
-Ideas that keep the code structure intact:
-
-- **Binary frames (CBOR/MessagePack)** to reduce BLE overhead
-- **Time sync** (e.g., client sends host time, device keeps offset)
-- **Sequence/CRC** in frames to detect drops
-- **SPIFFS/LittleFS logging** as a fallback when BLE is unavailable
-- **Config characteristic** exposing ranges (acc/gyro FS, LPF), units (mg vs m/s²), and calibration
-- **Multi‑platform UI** (PyQt/Qt for richer plotting; keep the Bleak core)
-
-Contributions are very welcome—see below.
-
----
-
-## Contributing
-
-1. Open an issue describing the bug/feature.
-2. For features, sketch the user‑visible change and any protocol additions.
-3. Submit a PR:
-   - Keep the JSON schema backward‑compatible when possible
-   - Update this README if you change the protocol or client behavior
-
----
-
-## License
-
-Add a license of your choice (e.g., MIT). If you want, I can drop in an MIT `LICENSE` file.
