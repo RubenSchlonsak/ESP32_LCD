@@ -113,8 +113,6 @@ class IMUGUI:
         tk.Entry(frm, textvariable=self.rate_var, width=5).grid(row=1, column=1)
         tk.Button(frm, text="Set Rate", command=self.set_rate).grid(row=1, column=2)
 
-        tk.Button(frm, text="Display ON", command=lambda: self.send_cmd("DISPLAY:ON")).grid(row=2, column=0)
-        tk.Button(frm, text="Display OFF", command=lambda: self.send_cmd("DISPLAY:OFF")).grid(row=2, column=1)
 
         # Recording controls
         tk.Button(frm, text="Start Recording", command=self.start_recording).grid(row=3, column=0)
